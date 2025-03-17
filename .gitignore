@@ -1,0 +1,46 @@
+# Бинарные файлы и исполняемые файлы
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Временные файлы
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+/content
+/enriched
+
+# Директории Go
+/bin/
+/pkg/
+/vendor/
+
+# Файлы IDE и редакторов
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Файлы логов и отладки
+*.log
+debug/
+
+# Файлы конфигурации и секретов
+.env
+*.env
+config.yaml
+secrets.yaml
+
+# Кэш Go
+go.work
+
+# Кэш тестового покрытия
+*.coverprofile
+coverage.out
+coverage.html 
