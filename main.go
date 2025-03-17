@@ -196,7 +196,9 @@ func enrichContent(config *Config, content string) (string, error) {
 
 	// Извлечение содержимого в зависимости от типа API
 	var enrichedContent string
-	if strings.Contains(strings.ToLower(config.ModelAPIURL), "openai") || strings.Contains(strings.ToLower(config.ModelAPIURL), "openrouter") {
+	if strings.Contains(strings.ToLower(config.ModelAPIURL), "openai") ||
+		strings.Contains(strings.ToLower(config.ModelAPIURL), "openrouter") ||
+		strings.Contains(strings.ToLower(config.ModelAPIURL), "chat/completions") {
 		choices, ok := responseData["choices"].([]interface{})
 		if !ok || len(choices) == 0 {
 			return "", fmt.Errorf("некорректный формат ответа API: отсутствует поле choices или оно пустое: %s", string(body))
