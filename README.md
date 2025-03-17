@@ -17,13 +17,13 @@ Rich - это утилита командной строки, разработа
 ## Установка
 
 ```bash
-go install github.com/yourusername/rich@latest
+go install github.com/Headcrab/rich@latest
 ```
 
 Или сборка из исходного кода:
 
 ```bash
-git clone https://github.com/yourusername/rich.git
+git clone https://github.com/Headcrab/rich.git
 cd rich
 go build
 ```
@@ -68,12 +68,12 @@ text = """Ваш промпт для обогащения контента"""
 
 ## Структура проекта
 
-```
+```tree
 rich/
 ├── main.go          # Основной код программы
 ├── rich.cfg         # Конфигурационный файл
-├── content/         # Директория с исходными файлами
-└── enriched/        # Директория с обработанными файлами
+├── todo/         # Директория с исходными файлами
+└── done/        # Директория с обработанными файлами
 ```
 
 ## Требования
@@ -99,4 +99,8 @@ MIT License. См. файл [LICENSE](LICENSE) для подробностей.
 
 ## Контакты
 
-Создайте issue в репозитории для сообщения о проблемах или предложений по улучшению. 
+Создайте issue в репозитории для сообщения о проблемах или предложений по улучшению.
+
+## Спасибо
+
+- [@Headcrab](https://github.com/Headcrab)
