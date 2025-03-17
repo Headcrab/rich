@@ -2,7 +2,7 @@
 
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Headcrab/rich)](https://go.dev)
 [![License](https://img.shields.io/github/license/Headcrab/rich)](LICENSE)
-[![Coverage](https://codecov.io/gh/Headcrab/rich/branch/main/graph/badge.svg)](https://codecov.io/gh/Headcrab/rich)
+[![Coverage](https://codecov.io/gh/Headcrab/rich/graph/badge.svg)](https://codecov.io/gh/Headcrab/rich)
 
 Rich - это утилита командной строки, разработанная на Go, которая автоматически обогащает markdown-файлы с использованием различных моделей искусственного интеллекта (GPT-4, Claude, Gemini). Инструмент анализирует содержимое markdown-файлов и дополняет их детальной информацией, ссылками и пояснениями.
 
