@@ -491,7 +491,9 @@ text = Test prompt`
 				},
 			},
 		}
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Errorf("Failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -626,7 +628,9 @@ text = Test prompt`
 				},
 			},
 		}
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Errorf("Failed to encode response: %v", err)
+		}
 	}))
 	defer server.Close()
 
