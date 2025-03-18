@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -15,6 +16,12 @@ import (
 
 	"gopkg.in/ini.v1"
 )
+
+// Максимальный размер файла для обработки (10 МБ)
+const MaxFileSize = 10 * 1024 * 1024
+
+// Ограничение количества запросов в минуту
+const RequestsPerMinute = 10
 
 // Конфигурация для процесса обогащения
 type Config struct {
@@ -75,7 +82,29 @@ func loadConfig(configPath string) (*Config, error) {
 	if modelSection := cfg.Section("MODEL"); modelSection != nil {
 		config.ModelName = modelSection.Key("name").MustString("gpt-3.5-turbo")
 		config.ModelAPIURL = modelSection.Key("api_url").MustString("https://api.openai.com/v1/chat/completions")
-		config.APIKey = modelSection.Key("api_key").String()
+
+		// Получение API ключа из переменной окружения в зависимости от провайдера
+		envKey := modelSection.Key("api_key_env").String()
+		if envKey != "" {
+			config.APIKey = os.Getenv(envKey)
+		} else {
+			// Автоматическое определение переменной окружения в зависимости от URL API
+			apiURL := strings.ToLower(config.ModelAPIURL)
+			switch {
+			case strings.Contains(apiURL, "openai"):
+				config.APIKey = os.Getenv("OPENAI_API_KEY")
+			case strings.Contains(apiURL, "openrouter"):
+				config.APIKey = os.Getenv("OPENROUTER_API_KEY")
+			case strings.Contains(apiURL, "anthropic"):
+				config.APIKey = os.Getenv("ANTHROPIC_API_KEY")
+			}
+
+			// Для обратной совместимости, если не найдено в переменных окружения
+			if config.APIKey == "" {
+				config.APIKey = modelSection.Key("api_key").String()
+			}
+		}
+
 		config.Temperature = modelSection.Key("temperature").MustFloat64(0.7)
 		config.MaxTokens = modelSection.Key("max_tokens").MustInt(1000)
 	}
@@ -85,16 +114,94 @@ func loadConfig(configPath string) (*Config, error) {
 		config.Prompt = promptSection.Key("text").String()
 	}
 
-	// Создать выходную директорию, если она не существует
-	if err := os.MkdirAll(config.OutputDir, 0755); err != nil {
+	// Безопасное создание выходной директории
+	outputDir, err := filepath.Abs(config.OutputDir)
+	if err != nil {
+		return nil, fmt.Errorf("не удалось получить абсолютный путь выходной директории: %v", err)
+	}
+
+	// Проверка, что выходная директория находится в безопасном месте
+	if !isPathSafe(outputDir) {
+		return nil, fmt.Errorf("небезопасный путь выходной директории: %s", outputDir)
+	}
+
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return nil, fmt.Errorf("не удалось создать выходную директорию: %v", err)
 	}
 
 	return config, nil
 }
 
+// Проверка безопасности пути (защита от path traversal)
+func isPathSafe(path string) bool {
+	// Проверка на наличие подозрительных последовательностей в пути
+	suspicious := []string{"../", "..\\"}
+	for _, s := range suspicious {
+		if strings.Contains(path, s) {
+			return false
+		}
+	}
+	return true
+}
+
+// Валидация содержимого файла
+func validateContent(content []byte) error {
+	// Проверка размера файла
+	if len(content) > MaxFileSize {
+		return fmt.Errorf("размер файла превышает максимально допустимый (%d байт)", MaxFileSize)
+	}
+
+	// Здесь можно добавить дополнительные проверки содержимого
+	return nil
+}
+
+// Ограничитель частоты запросов
+type RateLimiter struct {
+	tokens      chan struct{}
+	rateLimitMs time.Duration
+}
+
+// Создание нового ограничителя частоты запросов
+func NewRateLimiter(requestsPerMinute int) *RateLimiter {
+	rateLimitMs := time.Minute / time.Duration(requestsPerMinute)
+	limiter := &RateLimiter{
+		tokens:      make(chan struct{}, requestsPerMinute),
+		rateLimitMs: rateLimitMs,
+	}
+
+	// Инициализация токенов
+	for i := 0; i < requestsPerMinute; i++ {
+		limiter.tokens <- struct{}{}
+	}
+
+	// Запуск горутины для пополнения токенов
+	go func() {
+		ticker := time.NewTicker(rateLimitMs)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			select {
+			case limiter.tokens <- struct{}{}:
+				// Токен добавлен
+			default:
+				// Буфер полон
+			}
+		}
+	}()
+
+	return limiter
+}
+
+// Ожидание доступности токена
+func (r *RateLimiter) Wait() {
+	<-r.tokens
+}
+
 // Обогащение markdown содержимого с использованием AI API
-func enrichContent(config *Config, content string) (string, error) {
+func enrichContent(config *Config, content string, rateLimiter *RateLimiter) (string, error) {
+	// Ожидание доступности токена (ограничение частоты запросов)
+	rateLimiter.Wait()
+
 	// Подготовка полного промпта с содержимым
 	fullPrompt := fmt.Sprintf("%s\n\n%s", config.Prompt, content)
 
@@ -166,8 +273,18 @@ func enrichContent(config *Config, content string) (string, error) {
 		}
 	}
 
+	// Настройка HTTP клиента с проверкой TLS сертификатов
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	client := &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: transport,
+	}
+
 	// Выполнение запроса
-	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return content, fmt.Errorf("ошибка при выполнении HTTP запроса: %v", err)
@@ -186,8 +303,8 @@ func enrichContent(config *Config, content string) (string, error) {
 		return content, fmt.Errorf("ошибка при чтении ответа API: %v", err)
 	}
 
-	// Логируем ответ для отладки
-	log.Printf("Ответ API: %s", string(body))
+	// Логируем только статус ответа, а не полное содержимое
+	log.Printf("Получен ответ API: статус %d, размер %d байт", resp.StatusCode, len(body))
 
 	var responseData map[string]interface{}
 	if err := json.Unmarshal(body, &responseData); err != nil {
@@ -201,46 +318,46 @@ func enrichContent(config *Config, content string) (string, error) {
 		strings.Contains(strings.ToLower(config.ModelAPIURL), "chat/completions") {
 		choices, ok := responseData["choices"].([]interface{})
 		if !ok || len(choices) == 0 {
-			return "", fmt.Errorf("некорректный формат ответа API: отсутствует поле choices или оно пустое: %s", string(body))
+			return "", fmt.Errorf("некорректный формат ответа API: отсутствует поле choices или оно пустое")
 		}
 
 		firstChoice, ok := choices[0].(map[string]interface{})
 		if !ok {
-			return "", fmt.Errorf("некорректный формат элемента choices в ответе API: %s", string(body))
+			return "", fmt.Errorf("некорректный формат элемента choices в ответе API")
 		}
 
 		message, ok := firstChoice["message"].(map[string]interface{})
 		if !ok {
-			return "", fmt.Errorf("некорректный формат поля message в ответе API: %s", string(body))
+			return "", fmt.Errorf("некорректный формат поля message в ответе API")
 		}
 
 		messageContent, ok := message["content"].(string)
 		if !ok {
-			return "", fmt.Errorf("некорректный формат поля content в ответе API: %s", string(body))
+			return "", fmt.Errorf("некорректный формат поля content в ответе API")
 		}
 
 		enrichedContent = messageContent
 	} else if strings.Contains(strings.ToLower(config.ModelAPIURL), "anthropic") {
 		contentArray, ok := responseData["content"].([]interface{})
 		if !ok || len(contentArray) == 0 {
-			return "", fmt.Errorf("некорректный формат ответа Anthropic API: отсутствует поле content или оно пустое: %s", string(body))
+			return "", fmt.Errorf("некорректный формат ответа Anthropic API: отсутствует поле content или оно пустое")
 		}
 
 		firstContent, ok := contentArray[0].(map[string]interface{})
 		if !ok {
-			return "", fmt.Errorf("некорректный формат элемента content в ответе Anthropic API: %s", string(body))
+			return "", fmt.Errorf("некорректный формат элемента content в ответе Anthropic API")
 		}
 
 		text, ok := firstContent["text"].(string)
 		if !ok {
-			return "", fmt.Errorf("некорректный формат поля text в ответе Anthropic API: %s", string(body))
+			return "", fmt.Errorf("некорректный формат поля text в ответе Anthropic API")
 		}
 
 		enrichedContent = text
 	} else {
 		text, ok := responseData["text"].(string)
 		if !ok {
-			return "", fmt.Errorf("некорректный формат ответа API: %s", string(body))
+			return "", fmt.Errorf("некорректный формат ответа API")
 		}
 		enrichedContent = text
 	}
@@ -275,12 +392,64 @@ func addToExcludedFiles(configPath string, filename string) error {
 
 	exclSection.Key("excluded_files").SetValue(currentExcluded)
 
-	return cfg.SaveTo(configPath)
+	// Безопасная запись в файл конфигурации
+	tempFile := configPath + ".tmp"
+	if err := cfg.SaveTo(tempFile); err != nil {
+		return fmt.Errorf("не удалось сохранить временный файл конфигурации: %v", err)
+	}
+
+	if err := os.Rename(tempFile, configPath); err != nil {
+		return fmt.Errorf("не удалось переименовать временный файл конфигурации: %v", err)
+	}
+
+	return nil
+}
+
+// Безопасная запись в файл
+func safeWriteFile(path string, data []byte, perm os.FileMode) error {
+	// Создание временного файла
+	dir := filepath.Dir(path)
+	tempFile, err := os.CreateTemp(dir, "temp_*.tmp")
+	if err != nil {
+		return fmt.Errorf("не удалось создать временный файл: %v", err)
+	}
+	tempPath := tempFile.Name()
+
+	// Запись данных во временный файл
+	if _, err := tempFile.Write(data); err != nil {
+		tempFile.Close()
+		os.Remove(tempPath)
+		return fmt.Errorf("не удалось записать данные во временный файл: %v", err)
+	}
+
+	if err := tempFile.Close(); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("не удалось закрыть временный файл: %v", err)
+	}
+
+	// Установка прав доступа
+	if err := os.Chmod(tempPath, perm); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("не удалось установить права доступа для временного файла: %v", err)
+	}
+
+	// Переименование временного файла в целевой
+	if err := os.Rename(tempPath, path); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("не удалось переименовать временный файл: %v", err)
+	}
+
+	return nil
 }
 
 // Обработка одного markdown файла
-func processFile(config *Config, inputPath, outputPath string, configPath string) error {
+func processFile(config *Config, inputPath, outputPath string, configPath string, rateLimiter *RateLimiter) error {
 	log.Printf("Обработка %s", inputPath)
+
+	// Проверка безопасности путей
+	if !isPathSafe(inputPath) || !isPathSafe(outputPath) {
+		return fmt.Errorf("обнаружен небезопасный путь: %s или %s", inputPath, outputPath)
+	}
 
 	// Чтение оригинального содержимого
 	content, err := os.ReadFile(inputPath)
@@ -288,8 +457,13 @@ func processFile(config *Config, inputPath, outputPath string, configPath string
 		return fmt.Errorf("ошибка при чтении файла: %v", err)
 	}
 
+	// Валидация содержимого файла
+	if err := validateContent(content); err != nil {
+		return fmt.Errorf("ошибка валидации содержимого файла: %v", err)
+	}
+
 	// Обогащение содержимого
-	enrichedContent, err := enrichContent(config, string(content))
+	enrichedContent, err := enrichContent(config, string(content), rateLimiter)
 	if err != nil {
 		log.Printf("Предупреждение: ошибка при обогащении содержимого %s: %v", inputPath, err)
 		return err // Возвращаем ошибку и прекращаем обработку файла
@@ -307,15 +481,20 @@ func processFile(config *Config, inputPath, outputPath string, configPath string
 	// Объединение обогащенного содержимого с оригинальным в указанном формате
 	finalContent := fmt.Sprintf("%s\n\n```old\n%s\n```", enrichedContent, escapedContent)
 
-	// Запись результата
-	if err := os.WriteFile(outputPath, []byte(finalContent), 0644); err != nil {
+	// Безопасная запись результата
+	if err := safeWriteFile(outputPath, []byte(finalContent), 0644); err != nil {
 		return fmt.Errorf("ошибка при записи выходного файла: %v", err)
 	}
 
 	// Добавляем обработанный файл в список исключений только при успешном обогащении
 	filename := filepath.Base(inputPath)
 	if err := addToExcludedFiles(configPath, filename); err != nil {
+		// Обрабатываем ошибку, но не прерываем выполнение
 		log.Printf("Предупреждение: не удалось добавить файл в список исключений: %v", err)
+		// Попытка повторить операцию
+		if retryErr := addToExcludedFiles(configPath, filename); retryErr != nil {
+			log.Printf("Ошибка при повторной попытке добавить файл в список исключений: %v", retryErr)
+		}
 	}
 
 	log.Printf("Сохранено обогащенное содержимое в %s", outputPath)
@@ -335,11 +514,19 @@ func processDirectory(config *Config, configPath string) error {
 		return fmt.Errorf("ошибка при получении абсолютного пути выходной директории: %v", err)
 	}
 
+	// Проверка безопасности путей
+	if !isPathSafe(inputDir) || !isPathSafe(outputDir) {
+		return fmt.Errorf("обнаружен небезопасный путь директории: %s или %s", inputDir, outputDir)
+	}
+
 	// Множество исключенных файлов для быстрого поиска
 	excludedMap := make(map[string]bool)
 	for _, file := range config.ExcludedFiles {
 		excludedMap[file] = true
 	}
+
+	// Создание ограничителя частоты запросов
+	rateLimiter := NewRateLimiter(RequestsPerMinute)
 
 	// Счетчик обработанных файлов
 	fileCount := 0
@@ -372,10 +559,15 @@ func processDirectory(config *Config, configPath string) error {
 			return fmt.Errorf("ошибка при получении относительного пути: %v", err)
 		}
 
+		// Проверка на path traversal
+		if strings.Contains(relPath, "..") {
+			return fmt.Errorf("обнаружена попытка path traversal: %s", relPath)
+		}
+
 		outputPath := filepath.Join(outputDir, relPath)
 
 		// Обработка файла
-		if err := processFile(config, path, outputPath, configPath); err != nil {
+		if err := processFile(config, path, outputPath, configPath, rateLimiter); err != nil {
 			log.Printf("Ошибка при обработке %s: %v", path, err)
 			return nil // Продолжаем с другими файлами
 		}
@@ -398,8 +590,14 @@ func main() {
 	flag.Parse()
 
 	// Настройка логирования
+	logFile, err := os.OpenFile("rich.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Не удалось открыть файл журнала: %v", err)
+	}
+	defer logFile.Close()
+
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-	log.SetOutput(io.MultiWriter(os.Stdout))
+	log.SetOutput(io.MultiWriter(os.Stdout, logFile))
 
 	log.Printf("Запуск с конфигурацией из: %s", *configPath)
 
