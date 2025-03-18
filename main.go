@@ -85,9 +85,14 @@ func loadConfig(configPath string) (*Config, error) {
 
 		// Получение API ключа из переменной окружения в зависимости от провайдера
 		envKey := modelSection.Key("api_key_env").String()
-		if envKey != "" {
+
+		// Сначала пробуем получить ключ из файла конфигурации
+		config.APIKey = modelSection.Key("api_key").String()
+
+		// Затем, если указана переменная окружения, пробуем ее использовать
+		if envKey != "" && os.Getenv(envKey) != "" {
 			config.APIKey = os.Getenv(envKey)
-		} else {
+		} else if config.APIKey == "" {
 			// Автоматическое определение переменной окружения в зависимости от URL API
 			apiURL := strings.ToLower(config.ModelAPIURL)
 			switch {
@@ -97,11 +102,6 @@ func loadConfig(configPath string) (*Config, error) {
 				config.APIKey = os.Getenv("OPENROUTER_API_KEY")
 			case strings.Contains(apiURL, "anthropic"):
 				config.APIKey = os.Getenv("ANTHROPIC_API_KEY")
-			}
-
-			// Для обратной совместимости, если не найдено в переменных окружения
-			if config.APIKey == "" {
-				config.APIKey = modelSection.Key("api_key").String()
 			}
 		}
 
