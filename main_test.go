@@ -530,6 +530,23 @@ text = Test prompt`
 		// Проверяем, что выходной файл создан
 		if _, err := os.Stat(outputFilePath); os.IsNotExist(err) {
 			t.Error("Выходной файл не был создан")
+			return
+		}
+
+		// Читаем созданный файл и проверяем содержимое
+		data, err := os.ReadFile(outputFilePath)
+		if err != nil {
+			t.Fatalf("не удалось прочитать выходной файл: %v", err)
+		}
+		fileContent := string(data)
+
+		if !strings.Contains(fileContent, "Обогащенный контент") {
+			t.Error("В выходном файле отсутствует обогащенный контент")
+		}
+
+		expectedOldBlock := "```old\n" + inputContent + "\n```"
+		if !strings.Contains(fileContent, expectedOldBlock) {
+			t.Error("Оригинальное содержимое отсутствует в блоке ```old```")
 		}
 	})
 
@@ -680,6 +697,29 @@ text = Test prompt`
 		outputPath := filepath.Join(outputDir, f)
 		if _, err := os.Stat(outputPath); os.IsNotExist(err) {
 			t.Errorf("Ожидалось создание выходного файла %s, но он не найден", outputPath)
+			continue
+		}
+
+		// Проверяем содержимое созданного файла
+		data, err := os.ReadFile(outputPath)
+		if err != nil {
+			t.Fatalf("не удалось прочитать файл %s: %v", outputPath, err)
+		}
+		content := string(data)
+		if !strings.Contains(content, "Обогащенный контент") {
+			t.Errorf("В файле %s отсутствует обогащенный контент", outputPath)
+		}
+
+		original := ""
+		for _, fi := range files {
+			if fi.name == f {
+				original = fi.content
+				break
+			}
+		}
+		expectedOldBlock := "```old\n" + original + "\n```"
+		if !strings.Contains(content, expectedOldBlock) {
+			t.Errorf("Оригинальное содержимое в файле %s отсутствует в блоке ```old```", outputPath)
 		}
 	}
 
