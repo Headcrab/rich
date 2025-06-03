@@ -1,0 +1,200 @@
+version: '3'
+
+vars:
+  BINARY_NAME: rich
+  MAIN_PACKAGE: ./
+  COVER_PROFILE: coverage.out
+  GO_VERSION: 1.21
+
+env:
+  CGO_ENABLED: 0
+
+tasks:
+  default:
+    desc: show available tasks
+    cmds:
+      - task --list
+
+  setup:
+    desc: create necessary directories and setup project
+    cmds:
+      - cmd: mkdir -p done logs test_output
+        platforms: [linux, darwin]
+      - cmd: powershell.exe -Command "if (!(Test-Path 'done')) { New-Item -ItemType Directory -Path 'done' -Force }"
+        platforms: [windows]
+      - cmd: powershell.exe -Command "if (!(Test-Path 'logs')) { New-Item -ItemType Directory -Path 'logs' -Force }"
+        platforms: [windows]
+      - cmd: powershell.exe -Command "if (!(Test-Path 'test_output')) { New-Item -ItemType Directory -Path 'test_output' -Force }"
+        platforms: [windows]
+
+  deps:
+    desc: download and verify dependencies
+    cmds:
+      - go mod download
+      - go mod verify
+
+  tidy:
+    desc: tidy go modules
+    cmds:
+      - go mod tidy
+
+  fmt:
+    desc: format all go files
+    cmds:
+      - go fmt ./...
+
+  vet:
+    desc: run go vet
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: run golangci-lint (requires golangci-lint installed)
+    cmds:
+      - golangci-lint run ./...
+    status:
+      - which golangci-lint || where golangci-lint
+
+  test:
+    desc: run tests
+    deps: [setup]
+    cmds:
+      - go test -v ./...
+
+  test-race:
+    desc: run tests with race detector
+    deps: [setup]
+    cmds:
+      - go test -race -v ./...
+
+  test-coverage:
+    desc: run tests with coverage
+    deps: [setup]
+    cmds:
+      - go test -coverprofile={{.COVER_PROFILE}} -covermode=atomic ./...
+      - go tool cover -html={{.COVER_PROFILE}} -o coverage.html
+    generates:
+      - "{{.COVER_PROFILE}}"
+      - coverage.html
+
+  build:
+    desc: build the application
+    deps: [fmt, vet]
+    cmds:
+      - go build -ldflags="-s -w" -o {{.BINARY_NAME}}{{exeExt}} {{.MAIN_PACKAGE}}
+    generates:
+      - "{{.BINARY_NAME}}{{exeExt}}"
+
+  build-debug:
+    desc: build the application with debug info
+    deps: [fmt]
+    cmds:
+      - go build -o {{.BINARY_NAME}}-debug{{exeExt}} {{.MAIN_PACKAGE}}
+    generates:
+      - "{{.BINARY_NAME}}-debug{{exeExt}}"
+
+  run:
+    desc: run the application
+    deps: [setup]
+    cmds:
+      - go run {{.MAIN_PACKAGE}}
+
+  run-build:
+    desc: build and run the application
+    deps: [build]
+    cmds:
+      - cmd: ./{{.BINARY_NAME}}
+        platforms: [linux, darwin]
+      - cmd: .\{{.BINARY_NAME}}.exe
+        platforms: [windows]
+
+  install:
+    desc: install the application to GOPATH/bin
+    deps: [fmt, vet]
+    cmds:
+      - go install {{.MAIN_PACKAGE}}
+
+  clean:
+    desc: clean build artifacts and temporary files
+    cmds:
+      - cmd: rm -f {{.BINARY_NAME}} {{.BINARY_NAME}}-debug {{.COVER_PROFILE}} coverage.html
+        platforms: [linux, darwin]
+      - cmd: powershell.exe -Command "if (Test-Path '{{.BINARY_NAME}}.exe') { Remove-Item '{{.BINARY_NAME}}.exe' -Force }"
+        platforms: [windows]
+      - cmd: powershell.exe -Command "if (Test-Path '{{.BINARY_NAME}}-debug.exe') { Remove-Item '{{.BINARY_NAME}}-debug.exe' -Force }"
+        platforms: [windows]
+      - cmd: powershell.exe -Command "if (Test-Path '{{.COVER_PROFILE}}') { Remove-Item '{{.COVER_PROFILE}}' -Force }"
+        platforms: [windows]
+      - cmd: powershell.exe -Command "if (Test-Path 'coverage.html') { Remove-Item 'coverage.html' -Force }"
+        platforms: [windows]
+
+  clean-logs:
+    desc: clean log files
+    cmds:
+      - cmd: rm -rf logs/*
+        platforms: [linux, darwin]
+      - cmd: powershell.exe -Command "if (Test-Path 'logs') { Get-ChildItem -Path 'logs' | Remove-Item -Recurse -Force }"
+        platforms: [windows]
+
+  clean-output:
+    desc: clean test output files
+    cmds:
+      - cmd: rm -rf test_output/*
+        platforms: [linux, darwin]
+      - cmd: powershell.exe -Command "if (Test-Path 'test_output') { Get-ChildItem -Path 'test_output' | Remove-Item -Recurse -Force }"
+        platforms: [windows]
+
+  clean-all:
+    desc: clean everything (build artifacts, logs, output)
+    deps: [clean, clean-logs, clean-output]
+
+  check:
+    desc: run all checks (format, vet, test)
+    deps: [fmt, vet, test]
+
+  ci:
+    desc: run CI checks (format check, vet, test with coverage)
+    cmds:
+      - task: fmt-check
+      - task: vet
+      - task: test-coverage
+
+  fmt-check:
+    desc: check if code is formatted
+    cmds:
+      - cmd: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "Code is not formatted. Run 'task fmt' to fix."
+            exit 1
+          fi
+        platforms: [linux, darwin]
+      - cmd: |
+          $unformatted = go fmt ./...
+          if ($unformatted) {
+            Write-Host "Code is not formatted. Run 'task fmt' to fix."
+            exit 1
+          }
+        platforms: [windows]
+
+  dev:
+    desc: development mode with auto-reload (requires air)
+    deps: [setup]
+    cmds:
+      - air
+    status:
+      - which air || where air
+
+  help:
+    desc: show help for the application
+    cmds:
+      - go run {{.MAIN_PACKAGE}} --help
+
+  version:
+    desc: show version information
+    cmds:
+      - go version
+
+  benchmark:
+    desc: run benchmarks
+    cmds:
+      - go test -bench=. -benchmem ./...
