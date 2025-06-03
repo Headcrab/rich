@@ -371,6 +371,9 @@ func enrichContent(config *Config, content string, rateLimiter *RateLimiter) (st
 
 // Добавление файла в список исключений
 func addToExcludedFiles(configPath string, relPath string) error {
+	// Нормализуем путь для кроссплатформенности
+	relPath = filepath.Clean(relPath)
+
 	cfg, err := ini.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("не удалось загрузить файл конфигурации: %v", err)
@@ -382,7 +385,9 @@ func addToExcludedFiles(configPath string, relPath string) error {
 	// Проверяем, не добавлен ли уже файл
 	excludedFiles := strings.Split(currentExcluded, ",")
 	for _, ef := range excludedFiles {
-		if strings.TrimSpace(ef) == relPath {
+		// Нормализуем путь из конфига для сравнения
+		existingPath := filepath.Clean(strings.TrimSpace(ef))
+		if existingPath == relPath {
 			return nil // Файл уже в списке
 		}
 	}
