@@ -370,7 +370,7 @@ func enrichContent(config *Config, content string, rateLimiter *RateLimiter) (st
 }
 
 // Добавление файла в список исключений
-func addToExcludedFiles(configPath string, filename string) error {
+func addToExcludedFiles(configPath string, relPath string) error {
 	cfg, err := ini.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("не удалось загрузить файл конфигурации: %v", err)
@@ -382,16 +382,16 @@ func addToExcludedFiles(configPath string, filename string) error {
 	// Проверяем, не добавлен ли уже файл
 	excludedFiles := strings.Split(currentExcluded, ",")
 	for _, ef := range excludedFiles {
-		if strings.TrimSpace(ef) == filename {
+		if strings.TrimSpace(ef) == relPath {
 			return nil // Файл уже в списке
 		}
 	}
 
 	// Добавляем новый файл
 	if currentExcluded == "" {
-		currentExcluded = filename
+		currentExcluded = relPath
 	} else {
-		currentExcluded += ", " + filename
+		currentExcluded += ", " + relPath
 	}
 
 	exclSection.Key("excluded_files").SetValue(currentExcluded)
@@ -501,12 +501,15 @@ func processFile(config *Config, inputPath, outputPath string, configPath string
 	}
 
 	// Добавляем обработанный файл в список исключений только при успешном обогащении
-	filename := filepath.Base(inputPath)
-	if err := addToExcludedFiles(configPath, filename); err != nil {
+	relPath, errRel := filepath.Rel(config.InputDir, inputPath)
+	if errRel != nil || strings.Contains(relPath, "..") {
+		relPath = filepath.Base(inputPath)
+	}
+	if err := addToExcludedFiles(configPath, relPath); err != nil {
 		// Обрабатываем ошибку, но не прерываем выполнение
 		log.Printf("Предупреждение: не удалось добавить файл в список исключений: %v", err)
 		// Попытка повторить операцию
-		if retryErr := addToExcludedFiles(configPath, filename); retryErr != nil {
+		if retryErr := addToExcludedFiles(configPath, relPath); retryErr != nil {
 			log.Printf("Ошибка при повторной попытке добавить файл в список исключений: %v", retryErr)
 		}
 	}
@@ -536,7 +539,8 @@ func processDirectory(config *Config, configPath string) error {
 	// Множество исключенных файлов для быстрого поиска
 	excludedMap := make(map[string]bool)
 	for _, file := range config.ExcludedFiles {
-		excludedMap[file] = true
+		cleaned := filepath.Clean(file)
+		excludedMap[cleaned] = true
 	}
 
 	// Создание ограничителя частоты запросов
@@ -561,13 +565,7 @@ func processDirectory(config *Config, configPath string) error {
 			return nil
 		}
 
-		// Проверка на исключенные файлы
-		if excludedMap[info.Name()] {
-			log.Printf("Пропуск исключенного файла: %s", info.Name())
-			return nil
-		}
-
-		// Определение пути выходного файла
+		// Определение пути относительно входной директории
 		relPath, err := filepath.Rel(inputDir, path)
 		if err != nil {
 			return fmt.Errorf("ошибка при получении относительного пути: %v", err)
@@ -578,6 +576,14 @@ func processDirectory(config *Config, configPath string) error {
 			return fmt.Errorf("обнаружена попытка path traversal: %s", relPath)
 		}
 
+		// Проверка на исключенные файлы по относительному пути
+		relPath = filepath.Clean(relPath)
+		if excludedMap[relPath] {
+			log.Printf("Пропуск исключенного файла: %s", relPath)
+			return nil
+		}
+
+		// Определение пути выходного файла
 		outputPath := filepath.Join(outputDir, relPath)
 
 		// Обработка файла

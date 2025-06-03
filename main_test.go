@@ -383,14 +383,14 @@ func TestAddToExcludedFiles(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "test.cfg")
 
 	configContent := `[EXCLUSIONS]
-excluded_files = test1.md`
+excluded_files = dir1/test1.md`
 
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("Не удалось создать тестовый файл конфигурации: %v", err)
 	}
 
-	// Тестируем добавление нового файла
-	err := addToExcludedFiles(configPath, "test2.md")
+	// Тестируем добавление нового файла по относительному пути
+	err := addToExcludedFiles(configPath, "dir1/test2.md")
 	if err != nil {
 		t.Fatalf("addToExcludedFiles() вернул ошибку: %v", err)
 	}
@@ -403,7 +403,7 @@ excluded_files = test1.md`
 
 	found := false
 	for _, file := range config.ExcludedFiles {
-		if file == "test2.md" {
+		if file == filepath.Join("dir1", "test2.md") {
 			found = true
 			break
 		}
@@ -413,7 +413,7 @@ excluded_files = test1.md`
 	}
 
 	// Тестируем повторное добавление того же файла
-	err = addToExcludedFiles(configPath, "test2.md")
+	err = addToExcludedFiles(configPath, "dir1/test2.md")
 	if err != nil {
 		t.Fatalf("addToExcludedFiles() вернул ошибку при повторном добавлении: %v", err)
 	}
@@ -426,7 +426,7 @@ excluded_files = test1.md`
 	// Проверяем, что файл не добавлен дважды
 	count := 0
 	for _, file := range config.ExcludedFiles {
-		if file == "test2.md" {
+		if file == filepath.Join("dir1", "test2.md") {
 			count++
 		}
 	}
@@ -530,6 +530,23 @@ text = Test prompt`
 		// Проверяем, что выходной файл создан
 		if _, err := os.Stat(outputFilePath); os.IsNotExist(err) {
 			t.Error("Выходной файл не был создан")
+			return
+		}
+
+		// Читаем созданный файл и проверяем содержимое
+		data, err := os.ReadFile(outputFilePath)
+		if err != nil {
+			t.Fatalf("не удалось прочитать выходной файл: %v", err)
+		}
+		fileContent := string(data)
+
+		if !strings.Contains(fileContent, "Обогащенный контент") {
+			t.Error("В выходном файле отсутствует обогащенный контент")
+		}
+
+		expectedOldBlock := "```old\n" + inputContent + "\n```"
+		if !strings.Contains(fileContent, expectedOldBlock) {
+			t.Error("Оригинальное содержимое отсутствует в блоке ```old```")
 		}
 	})
 
@@ -576,6 +593,12 @@ func TestProcessDirectory(t *testing.T) {
 	if err := os.MkdirAll(inputDir, 0755); err != nil {
 		t.Fatalf("Не удалось создать входную директорию: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(inputDir, "dir1"), 0755); err != nil {
+		t.Fatalf("Не удалось создать поддиректорию: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(inputDir, "dir2"), 0755); err != nil {
+		t.Fatalf("Не удалось создать поддиректорию: %v", err)
+	}
 
 	// Создаем тестовый файл конфигурации
 	configContent := `[DIRECTORIES]
@@ -606,6 +629,8 @@ text = Test prompt`
 	}{
 		{"test1.md", "# Тест 1"},
 		{"test2.md", "# Тест 2"},
+		{filepath.Join("dir1", "dup.md"), "# Дубликат"},
+		{filepath.Join("dir2", "dup.md"), "# Дубликат"},
 		{"excluded.md", "# Исключенный файл"},
 		{"notmd.txt", "Это не markdown файл"},
 	}
@@ -662,11 +687,39 @@ text = Test prompt`
 	}
 
 	// Проверяем, что созданы выходные файлы для markdown-файлов, кроме исключенных
-	expectedFiles := []string{"test1.md", "test2.md"}
+	expectedFiles := []string{
+		"test1.md",
+		"test2.md",
+		filepath.Join("dir1", "dup.md"),
+		filepath.Join("dir2", "dup.md"),
+	}
 	for _, f := range expectedFiles {
 		outputPath := filepath.Join(outputDir, f)
 		if _, err := os.Stat(outputPath); os.IsNotExist(err) {
 			t.Errorf("Ожидалось создание выходного файла %s, но он не найден", outputPath)
+			continue
+		}
+
+		// Проверяем содержимое созданного файла
+		data, err := os.ReadFile(outputPath)
+		if err != nil {
+			t.Fatalf("не удалось прочитать файл %s: %v", outputPath, err)
+		}
+		content := string(data)
+		if !strings.Contains(content, "Обогащенный контент") {
+			t.Errorf("В файле %s отсутствует обогащенный контент", outputPath)
+		}
+
+		original := ""
+		for _, fi := range files {
+			if fi.name == f {
+				original = fi.content
+				break
+			}
+		}
+		expectedOldBlock := "```old\n" + original + "\n```"
+		if !strings.Contains(content, expectedOldBlock) {
+			t.Errorf("Оригинальное содержимое в файле %s отсутствует в блоке ```old```", outputPath)
 		}
 	}
 
@@ -676,6 +729,25 @@ text = Test prompt`
 		outputPath := filepath.Join(outputDir, f)
 		if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
 			t.Errorf("Файл %s не должен быть создан в выходной директории", outputPath)
+		}
+	}
+
+	// Проверяем, что файлы с одинаковыми именами записаны в исключения по относительному пути
+	updatedCfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatalf("Не удалось загрузить обновленную конфигурацию: %v", err)
+	}
+	expectedExcluded := []string{filepath.Join("dir1", "dup.md"), filepath.Join("dir2", "dup.md")}
+	for _, e := range expectedExcluded {
+		found := false
+		for _, f := range updatedCfg.ExcludedFiles {
+			if f == e {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Ожидалось присутствие %s в списке исключений", e)
 		}
 	}
 }
