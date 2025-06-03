@@ -43,7 +43,9 @@ text = Test prompt`
 	t.Run("LoadConfigFromFile", func(t *testing.T) {
 		// Удаляем переменную окружения, если она существует
 		if runtime.GOOS != "windows" {
-			os.Unsetenv("TEST_API_KEY")
+			if err := os.Unsetenv("TEST_API_KEY"); err != nil {
+				t.Fatalf("failed to unset env: %v", err)
+			}
 		}
 
 		config, err := loadConfig(configPath)
@@ -77,8 +79,14 @@ text = Test prompt`
 
 	// Тест с использованием API ключа из переменной окружения
 	t.Run("LoadConfigFromEnv", func(t *testing.T) {
-		os.Setenv("TEST_API_KEY", "env_test_key")
-		defer os.Unsetenv("TEST_API_KEY")
+		if err := os.Setenv("TEST_API_KEY", "env_test_key"); err != nil {
+			t.Fatalf("failed to set env: %v", err)
+		}
+		defer func() {
+			if err := os.Unsetenv("TEST_API_KEY"); err != nil {
+				t.Fatalf("failed to unset env: %v", err)
+			}
+		}()
 
 		config, err := loadConfig(configPath)
 		if err != nil {
