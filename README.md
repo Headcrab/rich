@@ -31,6 +31,72 @@ cd rich
 go build
 ```
 
+### Сборка с помощью Task
+
+Для удобства разработки в проекте используется [Task](https://taskfile.dev/) - современная альтернатива Make.
+
+#### Установка Task
+
+```bash
+# Windows (Chocolatey)
+choco install go-task
+
+# Windows (Scoop)  
+scoop install task
+
+# macOS (Homebrew)
+brew install go-task/tap/go-task
+
+# Linux (Snap)
+sudo snap install task --classic
+
+# Или через Go
+go install github.com/go-task/task/v3/cmd/task@latest
+```
+
+#### Доступные команды
+
+```bash
+# Показать все доступные задачи
+task
+
+# Настройка проекта (создание директорий)
+task setup
+
+# Сборка приложения
+task build
+
+# Запуск тестов
+task test
+
+# Запуск с покрытием кода
+task test-coverage
+
+# Форматирование кода
+task fmt
+
+# Статический анализ
+task vet
+
+# Полная проверка (fmt + vet + test)
+task check
+
+# Очистка артефактов сборки
+task clean
+
+# Очистка логов
+task clean-logs
+
+# Полная очистка
+task clean-all
+
+# Запуск приложения
+task run
+
+# Сборка и запуск
+task run-build
+```
+
 ## Конфигурация
 
 Создайте файл `rich.cfg` в директории проекта:
