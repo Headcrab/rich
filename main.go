@@ -157,16 +157,16 @@ func validateContent(content []byte) error {
 
 // Ограничитель частоты запросов
 type RateLimiter struct {
-	tokens      chan struct{}
-	rateLimitMs time.Duration
+	tokens   chan struct{}
+	interval time.Duration
 }
 
 // Создание нового ограничителя частоты запросов
 func NewRateLimiter(requestsPerMinute int) *RateLimiter {
-	rateLimitMs := time.Minute / time.Duration(requestsPerMinute)
+	interval := time.Minute / time.Duration(requestsPerMinute)
 	limiter := &RateLimiter{
-		tokens:      make(chan struct{}, requestsPerMinute),
-		rateLimitMs: rateLimitMs,
+		tokens:   make(chan struct{}, requestsPerMinute),
+		interval: interval,
 	}
 
 	// Инициализация токенов
@@ -176,7 +176,7 @@ func NewRateLimiter(requestsPerMinute int) *RateLimiter {
 
 	// Запуск горутины для пополнения токенов
 	go func() {
-		ticker := time.NewTicker(rateLimitMs)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		for range ticker.C {
@@ -289,7 +289,11 @@ func enrichContent(config *Config, content string, rateLimiter *RateLimiter) (st
 	if err != nil {
 		return content, fmt.Errorf("ошибка при выполнении HTTP запроса: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			log.Printf("Ошибка закрытия тела ответа: %v", cerr)
+		}
+	}()
 
 	// Проверка статуса ответа
 	if resp.StatusCode != http.StatusOK {
@@ -417,25 +421,35 @@ func safeWriteFile(path string, data []byte, perm os.FileMode) error {
 
 	// Запись данных во временный файл
 	if _, err := tempFile.Write(data); err != nil {
-		tempFile.Close()
-		os.Remove(tempPath)
+		if cerr := tempFile.Close(); cerr != nil {
+			log.Printf("Ошибка закрытия временного файла: %v", cerr)
+		}
+		if rerr := os.Remove(tempPath); rerr != nil {
+			log.Printf("Ошибка удаления временного файла: %v", rerr)
+		}
 		return fmt.Errorf("не удалось записать данные во временный файл: %v", err)
 	}
 
 	if err := tempFile.Close(); err != nil {
-		os.Remove(tempPath)
+		if rerr := os.Remove(tempPath); rerr != nil {
+			log.Printf("Ошибка удаления временного файла: %v", rerr)
+		}
 		return fmt.Errorf("не удалось закрыть временный файл: %v", err)
 	}
 
 	// Установка прав доступа
 	if err := os.Chmod(tempPath, perm); err != nil {
-		os.Remove(tempPath)
+		if rerr := os.Remove(tempPath); rerr != nil {
+			log.Printf("Ошибка удаления временного файла: %v", rerr)
+		}
 		return fmt.Errorf("не удалось установить права доступа для временного файла: %v", err)
 	}
 
 	// Переименование временного файла в целевой
 	if err := os.Rename(tempPath, path); err != nil {
-		os.Remove(tempPath)
+		if rerr := os.Remove(tempPath); rerr != nil {
+			log.Printf("Ошибка удаления временного файла: %v", rerr)
+		}
 		return fmt.Errorf("не удалось переименовать временный файл: %v", err)
 	}
 
@@ -594,7 +608,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Не удалось открыть файл журнала: %v", err)
 	}
-	defer logFile.Close()
+	defer func() {
+		if cerr := logFile.Close(); cerr != nil {
+			log.Printf("Ошибка закрытия файла журнала: %v", cerr)
+		}
+	}()
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	log.SetOutput(io.MultiWriter(os.Stdout, logFile))
