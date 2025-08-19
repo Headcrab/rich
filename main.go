@@ -787,18 +787,7 @@ func processFilePerLine(config *Config, inputPath, outputPath string, configPath
 		log.Printf("Сохранено обогащенное содержимое строки %d в %s", lineNo, lineOutputPath)
 	}
 
-	// Добавляем исходный файл в исключения, если что-то удалось обработать
 	if success > 0 {
-		relPath, errRel := filepath.Rel(config.InputDir, inputPath)
-		if errRel != nil || strings.Contains(relPath, "..") {
-			relPath = filepath.Base(inputPath)
-		}
-		if err := addToExcludedFiles(configPath, filepath.Clean(relPath)); err != nil {
-			log.Printf("Предупреждение: не удалось добавить файл в список исключений: %v", err)
-			if retryErr := addToExcludedFiles(configPath, filepath.Clean(relPath)); retryErr != nil {
-				log.Printf("Ошибка при повторной попытке добавить файл в список исключений: %v", retryErr)
-			}
-		}
 		return nil
 	}
 
