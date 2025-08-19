@@ -1,4 +1,4 @@
-module rich
+module github.com/Headcrab/rich
 
 go 1.24.1
 
