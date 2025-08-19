@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +36,10 @@ type Config struct {
 	Prompt        string
 	Temperature   float64
 	MaxTokens     int
+	// Если true, каждая строка входного файла рассматривается как отдельный промпт
+	PerLine bool
+	// Строковая спецификация выбора строк для построчного режима (например: "15,1-20,31-,-40")
+	LinesSpec string
 }
 
 // Загрузка конфигурации из INI файла
@@ -153,6 +159,155 @@ func validateContent(content []byte) error {
 
 	// Здесь можно добавить дополнительные проверки содержимого
 	return nil
+}
+
+// Регулярка для строки заголовка: допускает префиксы форматирования, регистр, скобочную и обычную форму
+var titleLineRe = regexp.MustCompile(`(?i)^\s*[-*#>\d\.)\(\s]*title\s*:\s*(?:\[(.*?)\]|(.+))\s*$`)
+
+// Санитизация имени файла (для Windows/Linux): удаление недопустимых символов
+func sanitizeFileName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	// Заменяем недопустимые символы
+	forbidden := []string{"<", ">", ":", "\"", "/", "\\", "|", "?", "*"}
+	for _, ch := range forbidden {
+		name = strings.ReplaceAll(name, ch, "_")
+	}
+	// Убираем управляющие символы
+	name = strings.Map(func(r rune) rune {
+		if r < 32 {
+			return -1
+		}
+		return r
+	}, name)
+	// Точки и пробелы в конце имени недопустимы в Windows
+	name = strings.TrimRight(name, ". ")
+	// Ограничим длину до разумной величины
+	if len(name) > 120 {
+		name = name[:120]
+		name = strings.TrimRight(name, " .")
+	}
+	if name == "" {
+		return "_"
+	}
+	return name
+}
+
+// Извлечение заголовка title:[FileTitle] из ответа и удаление строки из контента.
+// Если removeNextEmpty=true, то также удаляется ПЕРВАЯ пустая строка сразу после строки заголовка.
+func extractTitleAndStrip(enriched string, removeNextEmpty bool) (title string, stripped string) {
+	lines := strings.Split(enriched, "\n")
+	title = ""
+	out := make([]string, 0, len(lines))
+	skipNextIfEmpty := false
+
+	for i := 0; i < len(lines); i++ {
+		l := lines[i]
+		if skipNextIfEmpty {
+			if strings.TrimSpace(l) == "" {
+				// пропускаем ровно одну пустую строку после title
+				skipNextIfEmpty = false
+				continue
+			}
+			skipNextIfEmpty = false
+		}
+
+		// Пытаемся извлечь title с помощью регулярного выражения
+		if m := titleLineRe.FindStringSubmatch(l); m != nil {
+			candidate := ""
+			if len(m) > 1 && strings.TrimSpace(m[1]) != "" {
+				candidate = strings.TrimSpace(m[1])
+			} else if len(m) > 2 && strings.TrimSpace(m[2]) != "" {
+				candidate = strings.TrimSpace(m[2])
+			}
+			if candidate != "" && title == "" {
+				title = sanitizeFileName(candidate)
+				// Не добавляем строку title в результат
+				if removeNextEmpty {
+					skipNextIfEmpty = true
+				}
+				continue
+			}
+		}
+		out = append(out, l)
+	}
+
+	stripped = strings.Join(out, "\n")
+	return
+}
+
+// Парсинг спецификации строк (например: "15,1-20,31-,-40"). Возвращает множество выбранных строк (1-based)
+func parseLineSpec(spec string, total int) map[int]bool {
+	selected := make(map[int]bool)
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		// Пустая спецификация — ничего не ограничиваем (т.е. все строки)
+		for i := 1; i <= total; i++ {
+			selected[i] = true
+		}
+		return selected
+	}
+
+	parts := strings.Split(spec, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if strings.Contains(p, "-") {
+			// Диапазоны: a-b, a-, -b
+			hy := strings.SplitN(p, "-", 2)
+			left := strings.TrimSpace(hy[0])
+			right := strings.TrimSpace(hy[1])
+			var start, end int
+			if left == "" {
+				start = 1
+			} else {
+				if n, err := strconv.Atoi(left); err == nil {
+					start = n
+				} else {
+					continue
+				}
+			}
+			if right == "" {
+				end = total
+			} else {
+				if n, err := strconv.Atoi(right); err == nil {
+					end = n
+				} else {
+					continue
+				}
+			}
+			if start < 1 {
+				start = 1
+			}
+			if end > total {
+				end = total
+			}
+			if end < start {
+				continue
+			}
+			for i := start; i <= end; i++ {
+				selected[i] = true
+			}
+		} else {
+			// Одна строка
+			if n, err := strconv.Atoi(p); err == nil {
+				if n >= 1 && n <= total {
+					selected[n] = true
+				}
+			}
+		}
+	}
+	// Если после парсинга ничего не выбрано — выберем все, чтобы не было сюрпризов
+	if len(selected) == 0 {
+		for i := 1; i <= total; i++ {
+			selected[i] = true
+		}
+	}
+	return selected
 }
 
 // Ограничитель частоты запросов
@@ -280,7 +435,7 @@ func enrichContent(config *Config, content string, rateLimiter *RateLimiter) (st
 		},
 	}
 	client := &http.Client{
-		Timeout:   60 * time.Second,
+		Timeout:   180 * time.Second,
 		Transport: transport,
 	}
 
@@ -497,8 +652,24 @@ func processFile(config *Config, inputPath, outputPath string, configPath string
 	// Экранирование тройных обратных кавычек в оригинальном содержимом
 	escapedContent := strings.ReplaceAll(string(content), "```", "\\`\\`\\`")
 
+	// Извлекаем потенциальный заголовок и удаляем строку title: из контента
+	title, stripped := extractTitleAndStrip(enrichedContent, false)
+	if strings.TrimSpace(stripped) == "" {
+		stripped = enrichedContent
+	}
+
 	// Объединение обогащенного содержимого с оригинальным в указанном формате
-	finalContent := fmt.Sprintf("%s\n\n```old\n%s\n```", enrichedContent, escapedContent)
+	finalContent := fmt.Sprintf("%s\n\n```old\n%s\n```", stripped, escapedContent)
+
+	// Если в ответе был title — используем его как имя файла
+	if title != "" {
+		dir := filepath.Dir(outputPath)
+		ext := filepath.Ext(outputPath)
+		if ext == "" {
+			ext = ".md"
+		}
+		outputPath = filepath.Join(dir, title+ext)
+	}
 
 	// Безопасная запись результата
 	if err := safeWriteFile(outputPath, []byte(finalContent), 0644); err != nil {
@@ -521,6 +692,117 @@ func processFile(config *Config, inputPath, outputPath string, configPath string
 
 	log.Printf("Сохранено обогащенное содержимое в %s", outputPath)
 	return nil
+}
+
+// Построчная обработка markdown-файла: каждая непустая строка как отдельный промпт
+func processFilePerLine(config *Config, inputPath, outputPath string, configPath string, rateLimiter *RateLimiter) error {
+	log.Printf("Построчная обработка %s", inputPath)
+
+	// Безопасность путей
+	if !isPathSafe(inputPath) || !isPathSafe(outputPath) {
+		return fmt.Errorf("обнаружен небезопасный путь: %s или %s", inputPath, outputPath)
+	}
+
+	// Чтение оригинального содержимого
+	content, err := os.ReadFile(inputPath)
+	if err != nil {
+		return fmt.Errorf("ошибка при чтении файла: %v", err)
+	}
+
+	// Валидация содержимого файла
+	if err := validateContent(content); err != nil {
+		return fmt.Errorf("ошибка валидации содержимого файла: %v", err)
+	}
+
+	// Подготовка директории для выходных файлов
+	outputDir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("ошибка при создании выходной директории: %v", err)
+	}
+
+	// Базовые части имени
+	base := strings.TrimSuffix(filepath.Base(outputPath), filepath.Ext(outputPath))
+	ext := filepath.Ext(outputPath)
+	if ext == "" {
+		ext = ".md"
+	}
+
+	// Разбиваем содержимое по строкам
+	rawLines := strings.Split(string(content), "\n")
+	// Уберём завершающие \r
+	for i := range rawLines {
+		rawLines[i] = strings.TrimRight(rawLines[i], "\r")
+	}
+
+	totalLines := len(rawLines)
+	if totalLines == 0 {
+		log.Printf("Файл %s не содержит непустых строк — пропуск", inputPath)
+		return nil
+	}
+
+	// Определяем, какие строки обрабатывать
+	selected := parseLineSpec(config.LinesSpec, totalLines)
+	width := len(strconv.Itoa(totalLines))
+	success := 0
+	for idx, ln := range rawLines {
+		lineNo := idx + 1 // 1-based
+		if !selected[lineNo] {
+			continue
+		}
+		if strings.TrimSpace(ln) == "" {
+			// Пустые строки не обрабатываем
+			continue
+		}
+		// Обогащение одной строки
+		enriched, err := enrichContent(config, ln, rateLimiter)
+		if err != nil {
+			log.Printf("Предупреждение: ошибка при обогащении строки %d в %s: %v", lineNo, inputPath, err)
+			continue
+		}
+
+		// Извлекаем возможный заголовок и очищаем контент
+		title, stripped := extractTitleAndStrip(enriched, true)
+		if strings.TrimSpace(stripped) == "" {
+			stripped = enriched
+		}
+
+		// Экранирование обратных кавычек в оригинальной строке
+		escaped := strings.ReplaceAll(ln, "```", "\\`\\`\\`")
+		finalContent := fmt.Sprintf("%s\n\n```old\n%s\n```", stripped, escaped)
+
+		// Имя файла: <basename|title>__line-<NNN><ext>
+		effectiveBase := base
+		if title != "" {
+			effectiveBase = title
+		}
+		lineName := fmt.Sprintf("%s__line-%0*d%s", effectiveBase, width, lineNo, ext)
+		lineOutputPath := filepath.Join(outputDir, lineName)
+
+		if err := safeWriteFile(lineOutputPath, []byte(finalContent), 0644); err != nil {
+			log.Printf("Предупреждение: не удалось записать результат для строки %d (%s): %v", lineNo, lineOutputPath, err)
+			continue
+		}
+
+		success++
+		log.Printf("Сохранено обогащенное содержимое строки %d в %s", lineNo, lineOutputPath)
+	}
+
+	// Добавляем исходный файл в исключения, если что-то удалось обработать
+	if success > 0 {
+		relPath, errRel := filepath.Rel(config.InputDir, inputPath)
+		if errRel != nil || strings.Contains(relPath, "..") {
+			relPath = filepath.Base(inputPath)
+		}
+		if err := addToExcludedFiles(configPath, filepath.Clean(relPath)); err != nil {
+			log.Printf("Предупреждение: не удалось добавить файл в список исключений: %v", err)
+			if retryErr := addToExcludedFiles(configPath, filepath.Clean(relPath)); retryErr != nil {
+				log.Printf("Ошибка при повторной попытке добавить файл в список исключений: %v", retryErr)
+			}
+		}
+		return nil
+	}
+
+	return fmt.Errorf("не удалось обработать ни одной строки файла %s", inputPath)
 }
 
 // Обработка директории для получения всех markdown файлов
@@ -588,12 +870,18 @@ func processDirectory(config *Config, configPath string) error {
 			return nil
 		}
 
-		// Определение пути выходного файла
+		// Определение пути выходного файла (для стандартного режима это полный путь; для построчного — директория и базовое имя будут использованы)
 		outputPath := filepath.Join(outputDir, relPath)
 
-		// Обработка файла
-		if err := processFile(config, path, outputPath, configPath, rateLimiter); err != nil {
-			log.Printf("Ошибка при обработке %s: %v", path, err)
+		// Обработка файла (обычная или построчная)
+		var perr error
+		if config.PerLine {
+			perr = processFilePerLine(config, path, outputPath, configPath, rateLimiter)
+		} else {
+			perr = processFile(config, path, outputPath, configPath, rateLimiter)
+		}
+		if perr != nil {
+			log.Printf("Ошибка при обработке %s: %v", path, perr)
 			return nil // Продолжаем с другими файлами
 		}
 
@@ -612,6 +900,8 @@ func processDirectory(config *Config, configPath string) error {
 func main() {
 	// Обработка аргументов командной строки
 	configPath := flag.String("config", "rich.cfg", "Путь к файлу конфигурации")
+	perLine := flag.Bool("per-line", false, "Рассматривать каждую строку файла как отдельный промпт и сохранять результат в отдельном файле")
+	linesSpec := flag.String("lines", "", "Какие строки обрабатывать (напр.: '15,1-20,31-,-40'). Поддерживает одиночные номера и диапазоны")
 	flag.Parse()
 
 	// Настройка логирования
@@ -635,6 +925,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Ошибка загрузки конфигурации: %v", err)
 	}
+
+	// Применяем флаг построчной обработки
+	config.PerLine = *perLine
+	config.LinesSpec = strings.TrimSpace(*linesSpec)
 
 	// Обработка директории
 	if err := processDirectory(config, *configPath); err != nil {
